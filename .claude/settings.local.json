@@ -1,0 +1,19 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(python -m py_compile \"D:\\\\ceshi_python\\\\Claudecode-feishu\\\\start.py\")",
+      "Bash(python start.py)",
+      "Bash(timeout 5 python:*)",
+      "Bash(pip show pexpect)",
+      "Bash(timeout 8 python:*)",
+      "mcp__fetch__fetch",
+      "Bash(python:*)",
+      "Bash(git -C \"D:\\\\ceshi_python\\\\Claudecode-feishu\" checkout:*)",
+      "Bash(curl:*)"
+    ]
+  }
+}
