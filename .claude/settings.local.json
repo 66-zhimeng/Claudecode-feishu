@@ -13,7 +13,8 @@
       "mcp__fetch__fetch",
       "Bash(python:*)",
       "Bash(git -C \"D:\\\\ceshi_python\\\\Claudecode-feishu\" checkout:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "mcp__feishu-bot__send_feishu_reply"
     ]
   }
 }
