@@ -11,6 +11,8 @@
 依赖：pip install -r requirements.txt
 配置：复制 .env.example 为 .env，填入飞书凭证
 """
+from __future__ import annotations
+
 import sys
 import os
 import json
@@ -18,7 +20,7 @@ import queue
 import threading
 import time
 import subprocess
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 # Windows 控制台 UTF-8
 if sys.platform == "win32":
@@ -49,6 +51,46 @@ MY_ADMIN_ID = os.environ.get("FEISHU_MY_ADMIN_OPEN_ID", "").strip()
 CLAUDE_PATH = os.environ.get("CLAUDE_PATH", r"C:\Users\yq\.local\bin\claude.exe").strip()
 WORK_DIR = os.environ.get("WORK_DIR", r"D:\ceshi_python\Claudecode-feishu").strip()
 PROCESS_NAME = os.environ.get("CLAUDE_PROCESS_NAME", "claude.exe").strip()
+
+# 工作区持久化配置
+WORKSPACE_PERSIST_FILE = os.environ.get("WORKSPACE_PERSIST_FILE", "workspace_persist.json").strip()
+
+# ==================== 多工作区持久化 ====================
+def _get_persist_file_path() -> str:
+    """获取持久化文件路径"""
+    # 使用 app.py 所在目录
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, WORKSPACE_PERSIST_FILE)
+
+
+def _load_workspace_persist():
+    """加载工作区会话持久化"""
+    persist_file = _get_persist_file_path()
+    if not os.path.exists(persist_file):
+        logger.info("未找到工作区持久化文件，将创建新文件")
+        return {}
+
+    try:
+        with open(persist_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            logger.info(f"已加载工作区持久化数据: {len(data.get('workspace_chat_map', {}))} 个群聊映射")
+            return data
+    except Exception as e:
+        logger.warning(f"加载工作区持久化失败: {e}")
+        return {}
+
+
+def _save_workspace_persist():
+    """保存工作区会话持久化"""
+    persist_file = _get_persist_file_path()
+    try:
+        data = _workspace_manager.get_persist_data()
+        with open(persist_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.debug("已保存工作区持久化数据")
+    except Exception as e:
+        logger.warning(f"保存工作区持久化失败: {e}")
+
 
 # ==================== 多工作目录管理 ====================
 _workspaces: List[dict] = []  # 工作目录列表 [{"name": "xxx", "path": "xxx"}, ...]
@@ -90,12 +132,25 @@ def get_current_workspace() -> dict:
     return {"name": "未知", "path": ""}
 
 
-def switch_workspace(index: int) -> bool:
-    """切换到指定索引的工作目录"""
+def switch_workspace(index: int, chat_id: str = None) -> bool:
+    """切换到指定索引的工作目录
+
+    Args:
+        index: 工作区索引
+        chat_id: 可选，指定群聊ID，切换后该群聊将使用此工作区
+    """
     global _current_workspace_index
     if 0 <= index < len(_workspaces):
         _current_workspace_index = index
-        logger.info(f"已切换到工作目录: {get_current_workspace()['name']}")
+        ws = get_current_workspace()
+        logger.info(f"已切换到工作目录: {ws['name']}")
+
+        # 如果提供了 chat_id，更新映射
+        if chat_id:
+            _workspace_manager.set_chat_workspace(chat_id, index)
+            _save_workspace_persist()
+            logger.info(f"群聊 {chat_id} 已绑定到工作区 {ws['name']}")
+
         return True
     return False
 
@@ -111,6 +166,127 @@ def get_workspace_display_text() -> str:
         prefix = "👉 " if i == _current_workspace_index else "   "
         lines.append(f"{prefix}{i + 1}. {ws['name']}")
     return "\n".join(lines)
+
+# ==================== 多工作区独立进程管理 ====================
+class WorkspaceManager:
+    """管理多个独立的 Claude Code 进程，每个工作区对应一个进程"""
+
+    def __init__(self):
+        self._workspace_senders: Dict[int, ProcessInputSender] = {}  # index -> sender
+        self._workspace_pids: Dict[int, int] = {}  # index -> pid
+        self._workspace_chat_map: Dict[str, int] = {}  # chat_id -> workspace_index
+        self._lock = threading.Lock()
+
+    def ensure_workspace_claude(self, index: int, process_name: str = None) -> Optional[ProcessInputSender]:
+        """确保工作区的 Claude Code 进程存在，必要时启动（不等待窗口）"""
+        with self._lock:
+            # 如果已有 sender，直接返回
+            if index in self._workspace_senders:
+                sender = self._workspace_senders[index]
+                # 检查窗口是否仍然有效
+                if sender.find_process_and_window():
+                    return sender
+                else:
+                    # 窗口失效，移除旧的 sender
+                    del self._workspace_senders[index]
+                    if index in self._workspace_pids:
+                        del self._workspace_pids[index]
+
+            # 获取工作区配置
+            if index >= len(_workspaces):
+                logger.error(f"工作区索引 {index} 超出范围")
+                return None
+
+            workspace = _workspaces[index]
+            workspace_name = workspace.get("name", f"工作区{index}")
+
+            logger.info(f"启动工作区 {workspace_name} 的 Claude Code...")
+
+            # 启动 Claude Code 并获取 PID
+            pid = launch_claude_code(workspace)
+
+            # 保存 PID
+            if pid:
+                self._workspace_pids[index] = pid
+                logger.info(f"工作区 {workspace_name} 的 Claude Code PID: {pid}")
+
+            # 创建新的 sender，传入 PID 用于精确查找窗口
+            sender = ProcessInputSender(process_name or PROCESS_NAME, target_pid=pid)
+            self._workspace_senders[index] = sender
+            logger.info(f"✅ 已启动工作区 {workspace_name} 的 Claude Code，请手动启动窗口或等待其自动启动")
+            return sender
+
+    def get_pid(self, index: int) -> Optional[int]:
+        """获取工作区的 Claude Code 进程 PID"""
+        with self._lock:
+            return self._workspace_pids.get(index)
+
+    def get_sender_for_workspace(self, index: int) -> Optional[ProcessInputSender]:
+        """获取工作区对应的 sender，不自动启动"""
+        with self._lock:
+            return self._workspace_senders.get(index)
+
+    def get_or_create_sender(self, index: int) -> Optional[ProcessInputSender]:
+        """获取或创建工作区的 sender"""
+        sender = self.get_sender_for_workspace(index)
+        if sender:
+            return sender
+        return self.ensure_workspace_claude(index)
+
+    def send_to_workspace(self, index: int, text: str) -> bool:
+        """发送消息到指定工作区"""
+        sender = self.get_or_create_sender(index)
+        if not sender:
+            logger.error(f"无法获取工作区 {index} 的 sender")
+            return False
+
+        try:
+            sender.execute(text)
+            return True
+        except Exception as e:
+            logger.error(f"发送消息到工作区 {index} 失败: {e}")
+            return False
+
+    def close_workspace(self, index: int):
+        """关闭指定工作区的 Claude Code（仅从管理器中移除，进程由系统管理）"""
+        with self._lock:
+            if index in self._workspace_senders:
+                del self._workspace_senders[index]
+                logger.info(f"已关闭工作区 {index} 的 sender")
+
+    def close_all(self):
+        """关闭所有工作区"""
+        with self._lock:
+            self._workspace_senders.clear()
+            logger.info("已关闭所有工作区 sender")
+
+    def set_chat_workspace(self, chat_id: str, workspace_index: int):
+        """设置群聊对应的工作区"""
+        with self._lock:
+            self._workspace_chat_map[chat_id] = workspace_index
+
+    def get_chat_workspace(self, chat_id: str) -> int:
+        """获取群聊对应的工作区索引"""
+        with self._lock:
+            return self._workspace_chat_map.get(chat_id, 0)
+
+    def load_persist(self, data: dict):
+        """从持久化数据加载"""
+        with self._lock:
+            chat_map = data.get("workspace_chat_map", {})
+            self._workspace_chat_map = {k: int(v) for k, v in chat_map.items()}
+
+    def get_persist_data(self) -> dict:
+        """获取需要持久化的数据"""
+        with self._lock:
+            return {
+                "workspace_chat_map": self._workspace_chat_map
+            }
+
+
+# 全局工作区管理器
+_workspace_manager = WorkspaceManager()
+
 
 # ==================== GUI 自动化 ====================
 import ctypes
@@ -132,13 +308,19 @@ class ProcessInputSender:
     # Claude 无自己的窗口，只使用这些宿主终端进程的窗口
     HOST_TERMINAL_NAMES = ("cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe", "windows terminal.exe")
 
-    def __init__(self, process_name: str):
+    def __init__(self, process_name: str, target_pid: Optional[int] = None):
         self.process_name = (process_name or "claude.exe").strip().lower()
+        self.target_pid = target_pid  # 指定要查找的 Claude 进程 PID
         self.hwnd: Optional[int] = None
         self.pid: Optional[int] = None
 
     def find_process_and_window(self) -> bool:
         """查找 Claude 进程，并直接使用其父进程（cmd/PowerShell）的窗口"""
+
+        # 如果指定了 target_pid，优先用 PID 查找
+        if self.target_pid:
+            if self._find_by_pid(self.target_pid):
+                return True
 
         # 优先尝试查找 CLI 版本（终端中运行的 claude 命令）
         if self._find_cli_process():
@@ -146,6 +328,32 @@ class ProcessInputSender:
 
         # 其次尝试查找桌面版
         return self._find_desktop_process()
+
+    def _find_by_pid(self, target_pid: int) -> bool:
+        """通过指定的 PID 查找 Claude 进程和窗口"""
+        try:
+            # 获取 Claude 进程
+            proc = psutil.Process(target_pid)
+            proc_name = proc.name().lower()
+
+            # 如果是终端进程，直接找窗口
+            if proc_name in [n.lower() for n in ProcessInputSender.TERMINAL_PROCESS_NAMES]:
+                logger.debug(f"目标 PID 是终端进程: {proc_name}")
+                return self._find_terminal_window(target_pid, proc_name)
+
+            # 如果是 claude.exe，找其父进程窗口
+            if 'claude' in proc_name:
+                parent = proc.parent()
+                if parent:
+                    parent_name = parent.name().lower()
+                    logger.debug(f"Claude 进程的终端: {parent_name}")
+                    return self._find_terminal_window(parent.pid, parent_name)
+
+            logger.debug(f"PID {target_pid} 进程名: {proc_name}")
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            logger.debug(f"查找 PID {target_pid} 失败: {e}")
+
+        return False
 
     def _find_terminal_window(self, terminal_pid: int, terminal_name: str = "") -> bool:
         """查找终端进程的窗口"""
@@ -324,11 +532,14 @@ class ProcessInputSender:
 
 
 # ==================== Claude Code 启动器 ====================
-def launch_claude_code(workspace: dict = None):
+def launch_claude_code(workspace: dict = None) -> Optional[int]:
     """启动 Claude Code（跳过权限确认提示）
 
     Args:
         workspace: 工作目录信息 {"name": "xxx", "path": "xxx"}，若不传则使用当前工作目录
+
+    Returns:
+        启动的进程 PID，失败返回 None
     """
     # 确定使用的工作目录
     if workspace is None:
@@ -345,15 +556,16 @@ def launch_claude_code(workspace: dict = None):
     cmd = [CLAUDE_PATH, "--dangerously-skip-permissions"]
 
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             creationflags=subprocess.CREATE_NEW_CONSOLE
         )
-        logger.info(f"✅ Claude Code 已启动 (目录: {workspace_name})")
-        return True
+        pid = proc.pid
+        logger.info(f"✅ Claude Code 已启动 (目录: {workspace_name}, PID: {pid})")
+        return pid
     except Exception as e:
         logger.error(f"❌ 启动 Claude Code 失败: {e}")
-        return False
+        return None
 
 
 def wait_for_claude_window(sender: ProcessInputSender, timeout: int = 30) -> bool:
@@ -554,7 +766,6 @@ def _extract_action_callback_fields(data):
 
 # ==================== 消息处理 ====================
 _message_queue = queue.Queue()
-_sender: Optional[ProcessInputSender] = None
 
 
 def _check_config():
@@ -569,8 +780,6 @@ def _check_config():
 
 def do_process(data):
     """处理飞书消息"""
-    global _sender
-
     try:
         user_text, open_id, chat_id = _extract_event_fields(data)
         if not open_id:
@@ -612,11 +821,11 @@ def do_process(data):
         # 处理数字选择切换目录（从卡片点击传来的数字）
         if user_text_lower.isdigit():
             idx = int(user_text_lower) - 1
-            if switch_workspace(idx):
+            if switch_workspace(idx, chat_id):
                 ws = get_current_workspace()
                 _send_feishu_text(chat_id, f"✅ 已切换到工作目录: **{ws['name']}**\n路径: {ws['path']}")
-                # 启动新工作目录的 Claude Code
-                launch_claude_code(ws)
+                # 启动新工作目录的 Claude Code（使用工作区管理器）
+                _workspace_manager.ensure_workspace_claude(idx)
             return
 
         # 直接投递到队列 (包含 open_id 用于后续回复)，不再额外发状态提醒到飞书
@@ -652,11 +861,11 @@ def do_action_callback(data):
                 match = re.search(r'"index":\s*"(\d+)"', interaction_text)
                 if match:
                     idx = int(match.group(1))
-                    if switch_workspace(idx):
+                    if switch_workspace(idx, chat_id):
                         ws = get_current_workspace()
                         _send_feishu_text(chat_id, f"✅ 已切换到工作目录: **{ws['name']}**\n路径: {ws['path']}")
-                        # 启动新工作目录的 Claude Code
-                        launch_claude_code(ws)
+                        # 启动新工作目录的 Claude Code（使用工作区管理器）
+                        _workspace_manager.ensure_workspace_claude(idx)
                         return
             except Exception as e:
                 logger.error(f"解析工作目录选择失败: {e}")
@@ -673,9 +882,7 @@ def do_action_callback(data):
 
 
 def _message_worker():
-    """消息处理 worker"""
-    global _sender
-
+    """消息处理 worker - 支持多工作区路由"""
     while True:
         try:
             item = _message_queue.get()
@@ -686,18 +893,39 @@ def _message_worker():
                 user_text, chat_id = item if isinstance(item, tuple) else (item, None)
                 open_id = None
 
-            logger.info("正在注入消息到 Claude Code...")
+            # 确定使用哪个工作区
+            if chat_id:
+                workspace_index = _workspace_manager.get_chat_workspace(chat_id)
+            else:
+                workspace_index = _current_workspace_index
 
-            # 刷新窗口句柄
-            if not _sender.find_process_and_window():
-                logger.error(
-                    "未找到 Claude Code 窗口。请确保 Claude Code 已启动且未关闭；"
-                    "若在系统托盘，请先点击还原窗口。"
-                )
+            # 获取工作区信息
+            if workspace_index < len(_workspaces):
+                workspace_name = _workspaces[workspace_index].get("name", f"工作区{workspace_index}")
+            else:
+                workspace_name = "默认"
+
+            logger.info(f"正在注入消息到 {workspace_name} (索引: {workspace_index})...")
+
+            # 获取该工作区的 sender
+            sender = _workspace_manager.get_or_create_sender(workspace_index)
+            if not sender:
+                logger.error(f"无法获取工作区 {workspace_name} 的 Claude Code 窗口")
                 if chat_id:
                     _send_feishu_text(
                         chat_id,
-                        "❌ 未找到 Claude Code 窗口，请先启动或还原 Claude Code 后再试。"
+                        f"❌ 无法连接到工作区 {workspace_name} 的 Claude Code，请确保已启动。"
+                    )
+                _message_queue.task_done()
+                continue
+
+            # 刷新窗口句柄
+            if not sender.find_process_and_window():
+                logger.error(f"未找到工作区 {workspace_name} 的 Claude Code 窗口")
+                if chat_id:
+                    _send_feishu_text(
+                        chat_id,
+                        f"❌ 未找到工作区 {workspace_name} 的 Claude Code 窗口，请先启动或还原。"
                     )
                 _message_queue.task_done()
                 continue
@@ -708,6 +936,7 @@ def _message_worker():
             if is_card_interaction:
                 # 卡片交互消息
                 feishu_marker = f"""【系统提示】此消息来自飞书（卡片交互回调）。
+- 当前工作区: {workspace_name}
 - 用户已点击卡片按钮，请根据用户的操作继续处理
 - 请使用飞书机器人 MCP 工具将结果传回给用户
 
@@ -716,14 +945,19 @@ def _message_worker():
             else:
                 # 普通文本消息
                 feishu_marker = f"""【系统提示】此消息来自飞书。
+- 当前工作区: {workspace_name}
 - 请使用飞书机器人 MCP 工具将结果传回给用户
 
 用户消息：
 {user_text}"""
 
             # 执行注入
-            _sender.execute(feishu_marker)
-            logger.info("✅ 消息已注入")
+            sender.execute(feishu_marker)
+            logger.info(f"✅ 消息已注入到 {workspace_name}")
+
+            # 定期保存持久化（每10条消息）
+            if _message_queue.qsize() % 10 == 0:
+                _save_workspace_persist()
 
             _message_queue.task_done()
 
@@ -734,8 +968,6 @@ def _message_worker():
 
 # ==================== 主程序 ====================
 def main():
-    global _sender
-
     _check_config()
 
     logger.info("=" * 50)
@@ -745,23 +977,21 @@ def main():
     # 0. 加载工作目录配置
     load_workspace_configs()
 
-    # 1. 初始化 GUI 自动化
-    _sender = ProcessInputSender(PROCESS_NAME)
+    # 0.1 加载工作区持久化
+    persist_data = _load_workspace_persist()
+    if persist_data:
+        _workspace_manager.load_persist(persist_data)
 
-    # 2. 启动 Claude Code（使用当前工作目录）
-    if not launch_claude_code():
-        logger.error("启动 Claude Code 失败，程序退出")
-        sys.exit(1)
+    # 1. 启动当前工作区的 Claude Code（使用工作区管理器）
+    sender = _workspace_manager.ensure_workspace_claude(_current_workspace_index)
+    if not sender:
+        logger.warning("启动 Claude Code 失败或等待窗口超时，继续运行...")
 
-    # 3. 等待窗口就绪
-    if not wait_for_claude_window(_sender):
-        logger.warning("继续运行，请确保 Claude Code 已启动")
-
-    # 4. 启动消息处理 worker
+    # 2. 启动消息处理 worker
     worker = threading.Thread(target=_message_worker, daemon=True)
     worker.start()
 
-    # 5. 启动飞书 WebSocket
+    # 3. 启动飞书 WebSocket
     logger.info("=" * 50)
     logger.info("等待飞书消息中...")
     logger.info("=" * 50 + "\n")
@@ -786,4 +1016,22 @@ def main():
 
 
 if __name__ == "__main__":
+    import signal
+    import atexit
+
+    def _cleanup():
+        """程序退出时保存持久化"""
+        _save_workspace_persist()
+        logger.info("已保存工作区持久化数据")
+
+    atexit.register(_cleanup)
+
+    # 捕获 Ctrl+C 信号
+    def signal_handler(signum, frame):
+        logger.info("收到退出信号，正在保存数据...")
+        _save_workspace_persist()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
     main()

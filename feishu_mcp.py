@@ -742,72 +742,88 @@ def clean_markdown(text: str) -> str:
 
 
 @mcp.tool()
-async def send_feishu_reply(message: str, open_id: str = "", should_clean_markdown: bool = True) -> str:
+async def send_feishu_reply(message: str, open_id: str = "", chat_id: str = "", should_clean_markdown: bool = True) -> str:
     """
     【必须使用此工具】将任务结果、代码分析或回答发送给飞书用户。
 
     Args:
         message: 要发送给用户的具体文本内容。
         open_id: 接收消息的用户 Open ID（可选，不填则从环境变量 FEISHU_DEFAULT_OPEN_ID 读取）。
+        chat_id: 接收消息的群聊 ID（可选，优先级高于 open_id）。
         should_clean_markdown: 是否清理 Markdown 符号（默认 true，避免 ** 加粗显示）
     """
-    # 如果未提供 open_id，则从环境变量读取
-    if not open_id:
-        open_id = get_default_open_id()
-    if not open_id:
-        return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
+    # 优先使用 chat_id（群聊），其次使用 open_id（个人）
+    if not chat_id:
+        if not open_id:
+            open_id = get_default_open_id()
+        if not open_id:
+            return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
 
-    # 白名单验证
-    if not validate_open_id(open_id):
-        logger.warning(f"拒绝发送给未授权用户: {open_id}")
-        return "❌ 拒绝发送：用户不在白名单中"
+    # 白名单验证（仅对个人消息）
+    if chat_id:
+        logger.info(f"[MCP调用] send_feishu_reply - 发送到群聊 {chat_id}, 内容长度: {len(message)}")
+    else:
+        if not validate_open_id(open_id):
+            logger.warning(f"拒绝发送给未授权用户: {open_id}")
+            return "❌ 拒绝发送：用户不在白名单中"
+        logger.info(f"[MCP调用] send_feishu_reply - 发送给 {open_id}, 内容长度: {len(message)}")
 
     # 清理 Markdown 符号
     if should_clean_markdown:
         message = clean_markdown(message)
 
-    logger.info(f"[MCP调用] send_feishu_reply - 发送给 {open_id}, 内容长度: {len(message)}")
-
     client = get_feishu_client()
-    result = await client.send_message(open_id, "text", {"text": message})
-
-    if result.get("code") == 0:
-        logger.info("文本消息已发送给 {}", open_id)
-        return "✅ 消息已成功发送给用户。"
+    if chat_id:
+        result = await client.send_message(chat_id, "text", {"text": message}, receive_id_type="chat_id")
+        if result.get("code") == 0:
+            logger.info("文本消息已发送到群聊 {}", chat_id)
+            return "✅ 消息已成功发送到群聊。"
+    else:
+        result = await client.send_message(open_id, "text", {"text": message})
+        if result.get("code") == 0:
+            logger.info("文本消息已发送给 {}", open_id)
+            return "✅ 消息已成功发送给用户。"
 
     logger.error("发送失败: {}", result)
     return f"❌ 发送失败: {result.get('msg', result)}"
 
 
 @mcp.tool()
-async def send_feishu_interaction_receipt(action_id: str, open_id: str = "", content: str = "") -> str:
+async def send_feishu_interaction_receipt(action_id: str, open_id: str = "", chat_id: str = "", content: str = "") -> str:
     """
     发送卡片交互的回执消息（告诉用户已收到点击）。
 
     Args:
         action_id: 用户点击的按钮 ID。
         open_id: 接收消息的用户 Open ID（可选，不填则从环境变量读取）。
+        chat_id: 接收消息的群聊 ID（可选，优先级高于 open_id）。
         content: 额外的回执内容。
     """
-    # 如果未提供 open_id，则从环境变量读取
-    if not open_id:
-        open_id = get_default_open_id()
-    if not open_id:
-        return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
+    # 优先使用 chat_id（群聊），其次使用 open_id（个人）
+    if not chat_id:
+        if not open_id:
+            open_id = get_default_open_id()
+        if not open_id:
+            return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
 
-    # 白名单验证
-    if not validate_open_id(open_id):
-        logger.warning(f"拒绝发送给未授权用户: {open_id}")
-        return "❌ 拒绝发送：用户不在白名单中"
+    # 白名单验证（仅对个人消息）
+    if chat_id:
+        logger.info(f"[MCP调用] send_feishu_interaction_receipt - 交互回执发送到群聊 {chat_id}, action: {action_id}")
+    else:
+        if not validate_open_id(open_id):
+            logger.warning(f"拒绝发送给未授权用户: {open_id}")
+            return "❌ 拒绝发送：用户不在白名单中"
+        logger.info(f"[MCP调用] send_feishu_interaction_receipt - 交互回执 {open_id}, action: {action_id}")
 
     receipt_msg = f"✅ 已收到你的操作: {action_id}"
     if content:
         receipt_msg += f"\n{content}"
 
-    logger.info(f"[MCP调用] send_feishu_interaction_receipt - 交互回执 {open_id}, action: {action_id}")
-
     client = get_feishu_client()
-    result = await client.send_message(open_id, "text", {"text": receipt_msg})
+    if chat_id:
+        result = await client.send_message(chat_id, "text", {"text": receipt_msg}, receive_id_type="chat_id")
+    else:
+        result = await client.send_message(open_id, "text", {"text": receipt_msg})
 
     if result.get("code") == 0:
         return "✅ 回执已发送。"
@@ -817,7 +833,7 @@ async def send_feishu_interaction_receipt(action_id: str, open_id: str = "", con
 
 
 @mcp.tool()
-async def send_feishu_rich_text(title: str, content: str, open_id: str = "") -> str:
+async def send_feishu_rich_text(title: str, content: str, open_id: str = "", chat_id: str = "") -> str:
     """
     发送富文本消息（支持换行、加粗等格式）。
 
@@ -825,19 +841,23 @@ async def send_feishu_rich_text(title: str, content: str, open_id: str = "") -> 
         title: 消息标题。
         content: 消息内容（支持飞书 markdown 语法，如 \\n 换行，**加粗**）。
         open_id: 接收消息的用户 Open ID（可选，不填则从环境变量读取）。
+        chat_id: 接收消息的群聊 ID（可选，优先级高于 open_id）。
     """
-    # 如果未提供 open_id，则从环境变量读取
-    if not open_id:
-        open_id = get_default_open_id()
-    if not open_id:
-        return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
+    # 优先使用 chat_id（群聊），其次使用 open_id（个人）
+    if not chat_id:
+        if not open_id:
+            open_id = get_default_open_id()
+        if not open_id:
+            return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
 
-    # 白名单验证
-    if not validate_open_id(open_id):
-        logger.warning(f"拒绝发送给未授权用户: {open_id}")
-        return "❌ 拒绝发送：用户不在白名单中"
-
-    logger.info(f"[MCP调用] send_feishu_rich_text - 发送给 {open_id}, 标题: {title}")
+    # 白名单验证（仅对个人消息）
+    if chat_id:
+        logger.info(f"[MCP调用] send_feishu_rich_text - 发送到群聊 {chat_id}, 标题: {title}")
+    else:
+        if not validate_open_id(open_id):
+            logger.warning(f"拒绝发送给未授权用户: {open_id}")
+            return "❌ 拒绝发送：用户不在白名单中"
+        logger.info(f"[MCP调用] send_feishu_rich_text - 发送给 {open_id}, 标题: {title}")
 
     client = get_feishu_client()
 
@@ -855,7 +875,10 @@ async def send_feishu_rich_text(title: str, content: str, open_id: str = "") -> 
         ]
     }
 
-    result = await client.send_message(open_id, "post", rich_text_content)
+    if chat_id:
+        result = await client.send_message(chat_id, "post", rich_text_content, receive_id_type="chat_id")
+    else:
+        result = await client.send_message(open_id, "post", rich_text_content)
 
     if result.get("code") == 0:
         logger.info("富文本消息已发送给 {}", open_id)
@@ -868,6 +891,7 @@ async def send_feishu_rich_text(title: str, content: str, open_id: str = "") -> 
 @mcp.tool()
 async def send_feishu_card(title: str, content: str,
                            open_id: str = "",
+                           chat_id: str = "",
                            card_type: str = "template",
                            template_color: str = "blue",
                            actions: str = "") -> str:
@@ -878,22 +902,26 @@ async def send_feishu_card(title: str, content: str,
         title: 卡片标题。
         content: 卡片内容（支持 markdown）。
         open_id: 接收消息的用户 Open ID（可选，不填则从环境变量读取）。
+        chat_id: 接收消息的群聊 ID（可选，优先级高于 open_id）。
         card_type: 卡片类型 ("template" 模板卡片 或 "interactive" 交互卡片)。
         template_color: 模板颜色 ("blue", "green", "red", "yellow", "grey")。
         actions: 按钮配置，JSON 格式字符串，如 '[{"tag":"button","text":{"tag":"plain_text","content":"确定"},"type":"primary","action_id":"confirm"}]'
     """
-    # 如果未提供 open_id，则从环境变量读取
-    if not open_id:
-        open_id = get_default_open_id()
-    if not open_id:
-        return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
+    # 优先使用 chat_id（群聊），其次使用 open_id（个人）
+    if not chat_id:
+        if not open_id:
+            open_id = get_default_open_id()
+        if not open_id:
+            return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
 
-    # 白名单验证
-    if not validate_open_id(open_id):
-        logger.warning(f"拒绝发送给未授权用户: {open_id}")
-        return "❌ 拒绝发送：用户不在白名单中"
-
-    logger.info(f"[MCP调用] send_feishu_card - 发送给 {open_id}, 标题: {title}")
+    # 白名单验证（仅对个人消息）
+    if chat_id:
+        logger.info(f"[MCP调用] send_feishu_card - 发送到群聊 {chat_id}, 标题: {title}")
+    else:
+        if not validate_open_id(open_id):
+            logger.warning(f"拒绝发送给未授权用户: {open_id}")
+            return "❌ 拒绝发送：用户不在白名单中"
+        logger.info(f"[MCP调用] send_feishu_card - 发送给 {open_id}, 标题: {title}")
 
     client = get_feishu_client()
 
@@ -928,11 +956,17 @@ async def send_feishu_card(title: str, content: str,
         except json.JSONDecodeError:
             logger.warning("actions JSON 解析失败，跳过按钮")
 
-    result = await client.send_message(open_id, "interactive", card_content)
-
-    if result.get("code") == 0:
-        logger.info("卡片消息已发送给 {}", open_id)
-        return "✅ 卡片消息已成功发送给用户。"
+    # 发送到群聊或个人
+    if chat_id:
+        result = await client.send_message(chat_id, "interactive", card_content, receive_id_type="chat_id")
+        if result.get("code") == 0:
+            logger.info("卡片消息已发送到群聊 {}", chat_id)
+            return "✅ 卡片消息已成功发送到群聊。"
+    else:
+        result = await client.send_message(open_id, "interactive", card_content)
+        if result.get("code") == 0:
+            logger.info("卡片消息已发送给 {}", open_id)
+            return "✅ 卡片消息已成功发送给用户。"
 
     logger.error("发送失败: {}", result)
     return f"❌ 发送失败: {result.get('msg', result)}"
