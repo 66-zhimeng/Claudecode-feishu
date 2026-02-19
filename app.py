@@ -569,19 +569,14 @@ def _message_worker():
                 # 卡片交互消息
                 feishu_marker = f"""【系统提示】此消息来自飞书（卡片交互回调）。
 - 用户已点击卡片按钮，请根据用户的操作继续处理
-- 请使用飞书机器人 MCP 工具 (send_feishu_reply) 回复用户
-- 用户 Open ID：{open_id if open_id else 'unknown'}
-- 聊天 Chat ID：{chat_id if chat_id else 'unknown'}
+- 请使用飞书机器人 MCP 工具将结果传回给用户
 
 交互内容：
 {user_text}"""
             else:
                 # 普通文本消息
                 feishu_marker = f"""【系统提示】此消息来自飞书。
-- 请使用飞书机器人 MCP 工具 (send_feishu_reply) 回复用户
-- 回复时需要将结果发送到飞书
-- 用户 Open ID：{open_id if open_id else 'unknown'}
-- 聊天 Chat ID：{chat_id if chat_id else 'unknown'}
+- 请使用飞书机器人 MCP 工具将结果传回给用户
 
 用户消息：
 {user_text}"""
