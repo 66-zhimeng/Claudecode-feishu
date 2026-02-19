@@ -2,36 +2,19 @@
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
+  "claudeCode.allowDangerouslySkipPermissions": true,
+  "claudeCode.initialPermissionMode": "bypassPermissions",
+  "claudeCode.permissions.allow": [
+    "mcp__*",
+    "Read(*)",
+    "Write(*)",
+    "Edit(*)",
+    "Bash(*)"
+  ],
+  "claudeCode.enableAllProjectMcpServers": true,
   "permissions": {
     "allow": [
-      "mcp__sequential-thinking__sequentialthinking",
-      "Bash(timeout 5 python:*)",
-      "Bash(pip show pexpect)",
-      "Bash(timeout 8 python:*)",
-      "mcp__fetch__fetch",
-      "Bash(python:*)",
-      "Bash(git -C \"D:\\\\ceshi_python\\\\Claudecode-feishu\" checkout:*)",
-      "Bash(curl:*)",
-      "mcp__feishu-bot__send_feishu_reply",
-      "WebSearch",
-      "Bash(claude /plugin:*)",
-      "mcp__context7__resolve-library-id",
-      "mcp__context7__query-docs",
-      "mcp__feishu-bot__send_feishu_rich_text",
-      "WebFetch(domain:github.com)",
-      "Bash(gh search:*)",
-      "mcp__feishu-bot__send_feishu_card",
-      "mcp__plugin_claude-mem_mcp-search__search",
-      "Bash(where:*)",
-      "Bash(pip show:*)",
-      "Bash(pip install:*)",
-      "Bash(claude mcp list:*)",
-      "Bash(dir:*)",
-      "Bash(dir /s /b \"%USERPROFILE%\\\\.claude\\\\mcp*.json\")",
-      "Bash(tasklist:*)",
-      "Bash(findstr:*)",
-      "Bash(netstat:*)",
-      "Bash(set:*)"
+      "Bash(python -m py_compile:*)"
     ]
   }
 }

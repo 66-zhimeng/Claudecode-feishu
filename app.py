@@ -18,6 +18,7 @@ import queue
 import threading
 import time
 import subprocess
+from typing import Optional, List
 
 # Windows 控制台 UTF-8
 if sys.platform == "win32":
@@ -49,6 +50,68 @@ CLAUDE_PATH = os.environ.get("CLAUDE_PATH", r"C:\Users\yq\.local\bin\claude.exe"
 WORK_DIR = os.environ.get("WORK_DIR", r"D:\ceshi_python\Claudecode-feishu").strip()
 PROCESS_NAME = os.environ.get("CLAUDE_PROCESS_NAME", "claude.exe").strip()
 
+# ==================== 多工作目录管理 ====================
+_workspaces: List[dict] = []  # 工作目录列表 [{"name": "xxx", "path": "xxx"}, ...]
+_current_workspace_index: int = 0  # 当前工作目录索引
+
+
+def load_workspace_configs() -> List[dict]:
+    """从环境变量加载多工作目录配置"""
+    global _workspaces
+
+    # 优先使用 WORK_DIRS（逗号分隔的多个目录）
+    work_dirs_str = os.environ.get("WORK_DIRS", "").strip()
+    if work_dirs_str:
+        dir_list = [d.strip() for d in work_dirs_str.split(",") if d.strip()]
+        _workspaces = []
+        for dir_path in dir_list:
+            # 从路径提取目录名作为显示名称
+            name = os.path.basename(dir_path.rstrip("\\/")) or dir_path
+            _workspaces.append({"name": name, "path": dir_path})
+        logger.info(f"Loaded {len(_workspaces)} workspaces")
+        for ws in _workspaces:
+            logger.info(f"  - {ws['name']}: {ws['path']}")
+        return _workspaces
+
+    # 兼容旧版：使用单个 WORK_DIR
+    if WORK_DIR:
+        _workspaces = [{"name": os.path.basename(WORK_DIR.rstrip("\\/")) or WORK_DIR, "path": WORK_DIR}]
+        logger.info(f"使用单个工作目录: {_workspaces[0]['name']}")
+        return _workspaces
+
+    _workspaces = []
+    return _workspaces
+
+
+def get_current_workspace() -> dict:
+    """获取当前工作目录"""
+    if _workspaces and 0 <= _current_workspace_index < len(_workspaces):
+        return _workspaces[_current_workspace_index]
+    return {"name": "未知", "path": ""}
+
+
+def switch_workspace(index: int) -> bool:
+    """切换到指定索引的工作目录"""
+    global _current_workspace_index
+    if 0 <= index < len(_workspaces):
+        _current_workspace_index = index
+        logger.info(f"已切换到工作目录: {get_current_workspace()['name']}")
+        return True
+    return False
+
+
+def get_workspace_display_text() -> str:
+    """获取工作目录显示文本"""
+    if not _workspaces:
+        return "⚠️ 未配置任何工作目录"
+
+    current = get_current_workspace()
+    lines = [f"**当前目录**: {current['name']}", "", "**可选目录**:", ""]
+    for i, ws in enumerate(_workspaces):
+        prefix = "👉 " if i == _current_workspace_index else "   "
+        lines.append(f"{prefix}{i + 1}. {ws['name']}")
+    return "\n".join(lines)
+
 # ==================== GUI 自动化 ====================
 import ctypes
 import win32gui
@@ -57,7 +120,6 @@ import win32api
 import win32clipboard
 import win32process
 import psutil
-from typing import Optional, List
 
 user32 = ctypes.windll.user32
 
@@ -210,48 +272,19 @@ class ProcessInputSender:
         return False
 
     def activate_window(self):
-        """激活窗口（使用 AttachThreadInput 规避 Windows 前台锁限制）"""
+        """激活窗口（跳过激活直接尝试粘贴，Windows 限制下激活经常失败）"""
         if not self.hwnd:
             return
-        if win32gui.IsIconic(self.hwnd):
-            win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
-            time.sleep(0.2)
 
-        # 多次尝试激活窗口
-        for attempt in range(3):
-            try:
-                fore_hwnd = win32gui.GetForegroundWindow()
-                if fore_hwnd == self.hwnd:
-                    time.sleep(0.2)
-                    return
-
-                fore_tid, _ = win32process.GetWindowThreadProcessId(fore_hwnd)
-                my_tid = win32api.GetCurrentThreadId()
-                if fore_tid != my_tid and user32.AttachThreadInput(fore_tid, my_tid, True):
-                    try:
-                        win32gui.SetForegroundWindow(self.hwnd)
-                    finally:
-                        user32.AttachThreadInput(fore_tid, my_tid, False)
-                else:
-                    win32gui.SetForegroundWindow(self.hwnd)
-
-                time.sleep(0.3)
-                # 检查是否激活成功
-                if win32gui.GetForegroundWindow() == self.hwnd:
-                    return
-
-            except Exception as e:
-                logger.warning("激活窗口尝试 {} 失败: {}", attempt + 1, e)
-                time.sleep(0.5)
-
-        logger.warning("激活窗口失败，将尝试强制置顶")
-        # 最后尝试：使用 ShowWindow 强制显示
+        # 简化处理：直接尝试激活一次，失败则跳过
         try:
-            win32gui.ShowWindow(self.hwnd, win32con.SW_SHOWMINIMIZED)
-            time.sleep(0.2)
-            win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
-        except:
+            if win32gui.IsIconic(self.hwnd):
+                win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(self.hwnd)
+        except Exception:
             pass
+
+        time.sleep(0.2)
 
     def send_text_via_clipboard(self, text: str):
         """通过剪贴板粘贴发送（支持中文）"""
@@ -291,18 +324,32 @@ class ProcessInputSender:
 
 
 # ==================== Claude Code 启动器 ====================
-def launch_claude_code():
-    """启动 Claude Code"""
-    logger.info(f"正在启动 Claude Code: {CLAUDE_PATH}")
+def launch_claude_code(workspace: dict = None):
+    """启动 Claude Code（跳过权限确认提示）
 
-    os.chdir(WORK_DIR)
+    Args:
+        workspace: 工作目录信息 {"name": "xxx", "path": "xxx"}，若不传则使用当前工作目录
+    """
+    # 确定使用的工作目录
+    if workspace is None:
+        workspace = get_current_workspace()
+
+    work_dir = workspace.get("path", WORK_DIR)
+    workspace_name = workspace.get("name", "默认")
+
+    logger.info(f"正在启动 Claude Code (工作目录: {workspace_name}): {CLAUDE_PATH}")
+
+    os.chdir(work_dir)
+
+    # 添加 --dangerously-skip-permissions 跳过 "Do you want to proceed?" 确认
+    cmd = [CLAUDE_PATH, "--dangerously-skip-permissions"]
 
     try:
         subprocess.Popen(
-            [CLAUDE_PATH],
+            cmd,
             creationflags=subprocess.CREATE_NEW_CONSOLE
         )
-        logger.info("✅ Claude Code 已启动")
+        logger.info(f"✅ Claude Code 已启动 (目录: {workspace_name})")
         return True
     except Exception as e:
         logger.error(f"❌ 启动 Claude Code 失败: {e}")
@@ -358,6 +405,64 @@ def _send_feishu_text(chat_id: str, text: str) -> bool:
     except Exception as e:
         logger.warning("飞书发反馈失败: {}", e)
         return False
+
+
+def _send_workspace_selection_card(chat_id: str, open_id: str = None):
+    """发送工作目录选择卡片"""
+    if not _workspaces:
+        _send_feishu_text(chat_id, "⚠️ 未配置任何工作目录，请检查 WORK_DIRS 环境变量")
+        return
+
+    # 构建按钮列表
+    actions = []
+    for i, ws in enumerate(_workspaces):
+        # 每个按钮的 value 包含索引和目录名
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": f"📁 {ws['name']}"},
+            "type": "primary" if i == _current_workspace_index else "default",
+            "action_id": f"ws_select_{i}",
+            "value": {"index": str(i), "name": ws['name']}
+        })
+
+    # 构建卡片内容
+    card_content = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "📂 选择工作目录"},
+            "template": "blue"
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": get_workspace_display_text()
+            },
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": "点击下方按钮切换工作目录，切换后将自动启动对应目录的 Claude Code"}
+            },
+            {
+                "tag": "action",
+                "actions": actions
+            }
+        ]
+    }
+
+    try:
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+        body = (
+            CreateMessageRequestBody.builder()
+            .receive_id(chat_id)
+            .msg_type("interactive")
+            .content(lark_oapi.JSON.marshal(card_content))
+            .build()
+        )
+        req = CreateMessageRequest.builder().receive_id_type("chat_id").request_body(body).build()
+        resp = _get_feishu_client().im.v1.message.create(req)
+        if not (resp and getattr(resp, "code", -1) == 0):
+            logger.warning(f"发送工作目录卡片失败: {resp}")
+    except Exception as e:
+        logger.error(f"发送工作目录卡片异常: {e}")
 
 
 def _parse_message_content(content) -> str:
@@ -497,6 +602,23 @@ def do_process(data):
 
         logger.info(f"收到飞书消息: {user_text[:50]}... (open_id: {open_id})")
 
+        # 处理工作目录切换命令
+        user_text_lower = user_text.strip().lower()
+        if user_text_lower in ["/切换", "/目录", "/workspace", "/ws"]:
+            # 发送工作目录选择卡片
+            _send_workspace_selection_card(chat_id, open_id)
+            return
+
+        # 处理数字选择切换目录（从卡片点击传来的数字）
+        if user_text_lower.isdigit():
+            idx = int(user_text_lower) - 1
+            if switch_workspace(idx):
+                ws = get_current_workspace()
+                _send_feishu_text(chat_id, f"✅ 已切换到工作目录: **{ws['name']}**\n路径: {ws['path']}")
+                # 启动新工作目录的 Claude Code
+                launch_claude_code(ws)
+            return
+
         # 直接投递到队列 (包含 open_id 用于后续回复)，不再额外发状态提醒到飞书
         _message_queue.put((user_text, open_id, chat_id))
 
@@ -520,6 +642,24 @@ def do_action_callback(data):
             return
 
         logger.info(f"收到卡片交互: {interaction_text[:50]}...")
+
+        # 检查是否是工作目录选择按钮
+        if "ws_select_" in interaction_text:
+            # 解析按钮参数
+            try:
+                # 格式: 【卡片交互】用户点击了按钮: ws_select_X\n参数: {"index": "X", "name": "xxx"}
+                import re
+                match = re.search(r'"index":\s*"(\d+)"', interaction_text)
+                if match:
+                    idx = int(match.group(1))
+                    if switch_workspace(idx):
+                        ws = get_current_workspace()
+                        _send_feishu_text(chat_id, f"✅ 已切换到工作目录: **{ws['name']}**\n路径: {ws['path']}")
+                        # 启动新工作目录的 Claude Code
+                        launch_claude_code(ws)
+                        return
+            except Exception as e:
+                logger.error(f"解析工作目录选择失败: {e}")
 
         # 通知用户已收到
         if chat_id:
@@ -602,10 +742,13 @@ def main():
     logger.info("飞书 × Claude Code 整合应用")
     logger.info("=" * 50)
 
+    # 0. 加载工作目录配置
+    load_workspace_configs()
+
     # 1. 初始化 GUI 自动化
     _sender = ProcessInputSender(PROCESS_NAME)
 
-    # 2. 启动 Claude Code
+    # 2. 启动 Claude Code（使用当前工作目录）
     if not launch_claude_code():
         logger.error("启动 Claude Code 失败，程序退出")
         sys.exit(1)

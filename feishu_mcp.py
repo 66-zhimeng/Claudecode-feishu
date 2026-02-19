@@ -742,14 +742,14 @@ def clean_markdown(text: str) -> str:
 
 
 @mcp.tool()
-async def send_feishu_reply(message: str, open_id: str = "", clean_markdown: bool = True) -> str:
+async def send_feishu_reply(message: str, open_id: str = "", should_clean_markdown: bool = True) -> str:
     """
     【必须使用此工具】将任务结果、代码分析或回答发送给飞书用户。
 
     Args:
         message: 要发送给用户的具体文本内容。
         open_id: 接收消息的用户 Open ID（可选，不填则从环境变量 FEISHU_DEFAULT_OPEN_ID 读取）。
-        clean_markdown: 是否清理 Markdown 符号（默认 true，避免 ** 加粗显示）
+        should_clean_markdown: 是否清理 Markdown 符号（默认 true，避免 ** 加粗显示）
     """
     # 如果未提供 open_id，则从环境变量读取
     if not open_id:
@@ -763,7 +763,7 @@ async def send_feishu_reply(message: str, open_id: str = "", clean_markdown: boo
         return "❌ 拒绝发送：用户不在白名单中"
 
     # 清理 Markdown 符号
-    if clean_markdown:
+    if should_clean_markdown:
         message = clean_markdown(message)
 
     logger.info(f"[MCP调用] send_feishu_reply - 发送给 {open_id}, 内容长度: {len(message)}")
