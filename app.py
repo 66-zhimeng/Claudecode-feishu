@@ -95,11 +95,85 @@ def _save_workspace_persist():
 # ==================== 多工作目录管理 ====================
 _workspaces: List[dict] = []  # 工作目录列表 [{"name": "xxx", "path": "xxx"}, ...]
 _current_workspace_index: int = 0  # 当前工作目录索引
+_admin_open_id_detected: bool = False  # 是否已检测到 admin open_id
+
+
+def update_workspace_env_chat_id(workspace_dir: str, chat_id: str):
+    """更新工作区 .env 文件中的 CHAT_ID"""
+    if not workspace_dir or not chat_id:
+        return
+
+    env_file = os.path.join(workspace_dir, ".env")
+    key = "FEISHU_CURRENT_CHAT_ID"
+
+    try:
+        # 读取现有配置
+        env_vars = {}
+        if os.path.exists(env_file):
+            with open(env_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        k, v = line.split('=', 1)
+                        env_vars[k.strip()] = v.strip()
+
+        # 更新 CHAT_ID
+        old_chat_id = env_vars.get(key, "")
+        if old_chat_id != chat_id:
+            env_vars[key] = chat_id
+            # 写回文件
+            with open(env_file, 'w', encoding='utf-8') as f:
+                f.write("# 自动更新的 chat_id\n")
+                for k, v in env_vars.items():
+                    f.write(f"{k}={v}\n")
+            logger.info(f"已更新工作区 .env 中的 {key}: {chat_id}")
+    except Exception as e:
+        logger.warning(f"更新工作区 .env 失败: {e}")
+
+
+def detect_and_prompt_admin_open_id(open_id: str):
+    """检测并提示用户设置 admin open_id"""
+    global _admin_open_id_detected
+
+    if _admin_open_id_detected:
+        return
+
+    current_admin = os.environ.get("FEISHU_MY_ADMIN_OPEN_ID", "").strip()
+    if current_admin:
+        _admin_open_id_detected = True
+        return
+
+    if open_id:
+        _admin_open_id_detected = True
+        logger.info(f"检测到用户 open_id: {open_id}")
+        logger.info("=" * 50)
+        logger.info("💡 提示：您可以设置 FEISHU_MY_ADMIN_OPEN_ID 来限制只有您可以触发 Claude")
+        logger.info(f"   请在 .env 中添加: FEISHU_MY_ADMIN_OPEN_ID={open_id}")
+        logger.info("=" * 50)
 
 
 def load_workspace_configs() -> List[dict]:
     """从环境变量加载多工作目录配置"""
     global _workspaces
+
+    # 检查是否启用自动发现工作区
+    auto_discover = os.environ.get("WORK_DIRS_AUTO_DISCOVER", "").strip().lower()
+    if auto_discover in ("1", "true", "yes"):
+        # 自动发现：扫描父目录下的所有子目录
+        parent_dir = os.environ.get("WORK_DIRS_PARENT_DIR", "").strip()
+        if parent_dir and os.path.isdir(parent_dir):
+            _workspaces = []
+            for entry in os.listdir(parent_dir):
+                dir_path = os.path.join(parent_dir, entry)
+                if os.path.isdir(dir_path):
+                    # 跳过隐藏目录和特殊目录
+                    if not entry.startswith('.') and not entry.startswith('_'):
+                        _workspaces.append({"name": entry, "path": dir_path})
+            if _workspaces:
+                logger.info(f"自动发现 {len(_workspaces)} 个工作区:")
+                for ws in _workspaces:
+                    logger.info(f"  - {ws['name']}: {ws['path']}")
+                return _workspaces
 
     # 优先使用 WORK_DIRS（逗号分隔的多个目录）
     work_dirs_str = os.environ.get("WORK_DIRS", "").strip()
@@ -268,7 +342,13 @@ class WorkspaceManager:
     def get_chat_workspace(self, chat_id: str) -> int:
         """获取群聊对应的工作区索引"""
         with self._lock:
-            return self._workspace_chat_map.get(chat_id, 0)
+            # 返回 -1 表示该群聊未绑定工作区
+            return self._workspace_chat_map.get(chat_id, -1)
+
+    def is_chat_bound(self, chat_id: str) -> bool:
+        """检查群聊是否已绑定工作区"""
+        with self._lock:
+            return chat_id in self._workspace_chat_map
 
     def load_persist(self, data: dict):
         """从持久化数据加载"""
@@ -316,18 +396,24 @@ class ProcessInputSender:
 
     def find_process_and_window(self) -> bool:
         """查找 Claude 进程，并直接使用其父进程（cmd/PowerShell）的窗口"""
+        logger.debug(f"[find_process_and_window] target_pid={self.target_pid}")
 
         # 如果指定了 target_pid，优先用 PID 查找
         if self.target_pid:
             if self._find_by_pid(self.target_pid):
+                logger.debug(f"[find_process_and_window] 通过 target_pid={self.target_pid} 找到窗口")
                 return True
+            logger.debug(f"[find_process_and_window] target_pid={self.target_pid} 查找失败，回退到其他方法")
 
         # 优先尝试查找 CLI 版本（终端中运行的 claude 命令）
         if self._find_cli_process():
+            logger.debug(f"[find_process_and_window] 通过 _find_cli_process 找到窗口")
             return True
 
         # 其次尝试查找桌面版
-        return self._find_desktop_process()
+        result = self._find_desktop_process()
+        logger.debug(f"[find_process_and_window] _find_desktop_process 结果: {result}")
+        return result
 
     def _find_by_pid(self, target_pid: int) -> bool:
         """通过指定的 PID 查找 Claude 进程和窗口"""
@@ -583,6 +669,88 @@ def wait_for_claude_window(sender: ProcessInputSender, timeout: int = 30) -> boo
     return False
 
 
+# ==================== 扩展 WebSocket Client 支持卡片回调 ====================
+class ExtendedWSClient(lark_oapi.ws.Client):
+    """扩展的 WebSocket Client，支持卡片回调处理
+    
+    官方 Python SDK (lark_oapi) 的 ws.Client 在 _handle_data_frame 中对 MessageType.CARD
+    直接 return，没有实际处理。此类通过重写该方法来添加卡片回调支持。
+    """
+    
+    def __init__(self, app_id: str, app_secret: str, 
+                 event_handler=None,
+                 card_action_handler=None,
+                 log_level=lark_oapi.LogLevel.INFO,
+                 domain: str = lark_oapi.core.const.FEISHU_DOMAIN,
+                 auto_reconnect: bool = True):
+        super().__init__(app_id, app_secret, log_level, event_handler, domain, auto_reconnect)
+        self._card_action_handler = card_action_handler
+    
+    async def _handle_data_frame(self, frame):
+        """重写数据帧处理，添加卡片回调支持"""
+        import http
+        import base64
+        from lark_oapi.ws.enum import MessageType
+        from lark_oapi.ws.const import HEADER_MESSAGE_ID, HEADER_TRACE_ID, HEADER_SUM, HEADER_SEQ, HEADER_TYPE, HEADER_BIZ_RT
+        from lark_oapi.ws.model import Response
+        from lark_oapi.core.const import UTF_8
+        from lark_oapi.core.json import JSON
+        import time
+        
+        def _get_by_key(headers, key: str) -> str:
+            for header in headers:
+                if header.key == key:
+                    return header.value
+            raise Exception(f"Header not found: {key}")
+        
+        hs = frame.headers
+        msg_id = _get_by_key(hs, HEADER_MESSAGE_ID)
+        trace_id = _get_by_key(hs, HEADER_TRACE_ID)
+        sum_ = _get_by_key(hs, HEADER_SUM)
+        seq = _get_by_key(hs, HEADER_SEQ)
+        type_ = _get_by_key(hs, HEADER_TYPE)
+        
+        pl = frame.payload
+        if int(sum_) > 1:
+            pl = self._combine(msg_id, int(sum_), int(seq), pl)
+            if pl is None:
+                return
+        
+        message_type = MessageType(type_)
+        logger.debug(f"[ExtendedWSClient] 收到消息, type={message_type.value}, msg_id={msg_id}")
+        
+        resp = Response(code=http.HTTPStatus.OK)
+        try:
+            start = int(round(time.time() * 1000))
+            result = None
+            
+            if message_type == MessageType.EVENT:
+                if self._event_handler:
+                    result = self._event_handler.do_without_validation(pl)
+            elif message_type == MessageType.CARD:
+                # 处理卡片回调
+                if self._card_action_handler:
+                    result = self._card_action_handler(pl)
+                else:
+                    logger.warning(f"收到卡片回调但未注册处理器, msg_id={msg_id}")
+                    return
+            else:
+                return
+            
+            end = int(round(time.time() * 1000))
+            header = hs.add()
+            header.key = HEADER_BIZ_RT
+            header.value = str(end - start)
+            if result is not None:
+                resp.data = base64.b64encode(JSON.marshal(result).encode(UTF_8))
+        except Exception as e:
+            logger.error(f"处理消息失败, type={message_type.value}, msg_id={msg_id}, err={e}")
+            resp = Response(code=http.HTTPStatus.INTERNAL_SERVER_ERROR)
+        
+        frame.payload = JSON.marshal(resp).encode(UTF_8)
+        await self._write_message(frame.SerializeToString())
+
+
 # ==================== 飞书机器人 ====================
 _feishu_client = None
 
@@ -728,40 +896,6 @@ def _extract_event_fields(data):
     return user_text, open_id, chat_id
 
 
-def _extract_action_callback_fields(data):
-    """提取卡片按钮点击事件的信息"""
-    try:
-        # 处理字典类型的事件数据
-        if isinstance(data, dict):
-            event = data.get("event", {})
-            if not event:
-                return None, None, None
-
-            # 获取 sender 信息
-            sender = event.get("sender", {})
-            sender_id = sender.get("sender_id", {}) if sender else {}
-            open_id = sender_id.get("open_id") if isinstance(sender_id, dict) else None
-
-            # 获取 action 信息
-            action = event.get("action", {})
-            action_id = action.get("action_id") if action else None
-            value = action.get("value") if action else None
-
-            # 获取 chat_id
-            message = event.get("message", {})
-            chat_id = message.get("chat_id") if message else None
-
-            if action_id:
-                # 构建交互结果消息
-                interaction_result = f"【卡片交互】用户点击了按钮: {action_id}"
-                if value:
-                    interaction_result += f"\n参数: {json.dumps(value, ensure_ascii=False)}"
-
-                return interaction_result, open_id, chat_id
-    except Exception as e:
-        logger.error("解析卡片交互事件失败: {}", e)
-
-    return None, None, None
 
 
 # ==================== 消息处理 ====================
@@ -776,6 +910,113 @@ def _check_config():
     if not APP_SECRET or APP_SECRET == "你的_App_Secret":
         logger.error("未配置 FEISHU_APP_SECRET，请在 .env 中填入飞书凭证")
         sys.exit(1)
+
+
+def _extract_action_callback_fields(data):
+    """提取卡片交互回调的字段 - 支持 SDK 对象和字典两种格式"""
+    action = None
+    open_id = None
+    chat_id = None
+
+    logger.info("_extract_action_callback_fields 收到数据: {}", type(data))
+
+    # 方式1: SDK 对象 (P2CardActionTrigger)
+    if hasattr(data, "event"):
+        event = data.event
+        logger.info("使用 SDK 对象方式解析, event 类型: {}", type(event))
+
+        if hasattr(event, "action") and event.action:
+            action_obj = event.action
+            # action.value 是一个字典，如 {"action": "switch_workspace", ...}
+            action_value = getattr(action_obj, "value", None)
+            if isinstance(action_value, dict):
+                action = action_value.get("action") or action_value.get("value")
+            if not action:
+                action = getattr(action_obj, "name", "") or getattr(action_obj, "value", "")
+
+        if hasattr(event, "operator") and event.operator:
+            operator = event.operator
+            open_id = getattr(operator, "open_id", None) or getattr(operator, "user_id", None)
+            logger.info("operator open_id: {}", open_id)
+
+        if hasattr(event, "context") and event.context:
+            context = event.context
+            chat_id = getattr(context, "open_chat_id", None)
+            logger.info("context open_chat_id: {}", chat_id)
+
+    # 方式2: 字典格式
+    elif isinstance(data, dict):
+        logger.info("使用字典方式解析")
+        event = data.get("event", {})
+        action_obj = event.get("action", {})
+        action_value = action_obj.get("value", {})
+        if isinstance(action_value, dict):
+            action = action_value.get("action") or action_value.get("value")
+        if not action:
+            action = action_obj.get("name", "") or action_obj.get("value", "")
+
+        operator = event.get("operator", {})
+        open_id = operator.get("open_id") or operator.get("user_id")
+
+        context = event.get("context", {})
+        chat_id = context.get("open_chat_id")
+
+    # 处理 action 值 - 支持多种格式
+    if isinstance(action, dict):
+        # 优先提取 name 字段（工作区切换卡片的格式）
+        action = action.get("name") or action.get("action") or action.get("value") or str(action)
+    action_text = str(action) if action else "未知操作"
+
+    logger.info("解析结果: action={}, open_id={}, chat_id={}", action_text, open_id, chat_id)
+    return action_text, open_id, chat_id
+
+
+def do_action_callback(data):
+    """处理飞书卡片按钮点击回调"""
+    logger.info("=" * 50)
+    logger.info("收到卡片回调事件 - 开始处理")
+
+    try:
+        interaction_text, open_id, chat_id = _extract_action_callback_fields(data)
+        logger.info("解析结果 - action: {}, open_id: {}, chat_id: {}", interaction_text, open_id, chat_id)
+
+        if not open_id:
+            logger.info("无法解析卡片交互的 open_id，跳过")
+            return
+
+        if MY_ADMIN_ID and open_id != MY_ADMIN_ID:
+            logger.info(f"非管理员卡片交互已忽略: {open_id}")
+            return
+
+        logger.info(f"收到飞书卡片交互: {interaction_text} (open_id: {open_id}, chat_id: {chat_id})")
+
+        # 直接处理工作区切换（不投递到消息队列）
+        workspace_name = interaction_text.strip()
+        workspaces = load_workspace_configs()
+        idx = None
+        for i, ws in enumerate(workspaces):
+            if ws["name"] == workspace_name:
+                idx = i
+                break
+
+        if idx is not None:
+            if switch_workspace(idx, chat_id):
+                ws = get_current_workspace()
+                _send_feishu_text(chat_id, f"✅ 已切换到工作目录: **{ws['name']}**\n路径: {ws['path']}")
+                # 启动新工作目录的 Claude Code
+                _workspace_manager.ensure_workspace_claude(idx)
+                logger.info("工作区切换成功: {}", ws["name"])
+            else:
+                _send_feishu_text(chat_id, f"❌ 切换工作区失败")
+        else:
+            _send_feishu_text(chat_id, f"❌ 未找到工作区: {workspace_name}")
+
+        logger.info("=" * 50)
+
+    except Exception as e:
+        logger.error("处理卡片回调异常: {}", e)
+        import traceback
+        logger.error("详细堆栈: {}", traceback.format_exc())
 
 
 def do_process(data):
@@ -809,7 +1050,7 @@ def do_process(data):
             logger.info("空文本消息，跳过")
             return
 
-        logger.info(f"收到飞书消息: {user_text[:50]}... (open_id: {open_id})")
+        logger.info(f"收到飞书消息: {user_text[:50]}... (open_id: {open_id}, chat_id: {chat_id})")
 
         # 处理工作目录切换命令
         user_text_lower = user_text.strip().lower()
@@ -835,50 +1076,6 @@ def do_process(data):
         logger.error("处理消息异常: {}", e)
 
 
-def do_action_callback(data):
-    """处理卡片按钮点击事件"""
-    try:
-        # 提取交互信息
-        interaction_text, open_id, chat_id = _extract_action_callback_fields(data)
-
-        if not interaction_text:
-            logger.info("无法解析卡片交互事件，跳过")
-            return
-
-        # 管理员验证
-        if MY_ADMIN_ID and open_id != MY_ADMIN_ID:
-            logger.info(f"非管理员卡片交互已忽略: {open_id}")
-            return
-
-        logger.info(f"收到卡片交互: {interaction_text[:50]}...")
-
-        # 检查是否是工作目录选择按钮
-        if "ws_select_" in interaction_text:
-            # 解析按钮参数
-            try:
-                # 格式: 【卡片交互】用户点击了按钮: ws_select_X\n参数: {"index": "X", "name": "xxx"}
-                import re
-                match = re.search(r'"index":\s*"(\d+)"', interaction_text)
-                if match:
-                    idx = int(match.group(1))
-                    if switch_workspace(idx, chat_id):
-                        ws = get_current_workspace()
-                        _send_feishu_text(chat_id, f"✅ 已切换到工作目录: **{ws['name']}**\n路径: {ws['path']}")
-                        # 启动新工作目录的 Claude Code（使用工作区管理器）
-                        _workspace_manager.ensure_workspace_claude(idx)
-                        return
-            except Exception as e:
-                logger.error(f"解析工作目录选择失败: {e}")
-
-        # 通知用户已收到
-        if chat_id:
-            _send_feishu_text(chat_id, "✅ 收到交互，正在处理...")
-
-        # 投递到队列
-        _message_queue.put((interaction_text, open_id, chat_id))
-
-    except Exception as e:
-        logger.error("处理卡片交互异常: {}", e)
 
 
 def _message_worker():
@@ -894,10 +1091,20 @@ def _message_worker():
                 open_id = None
 
             # 确定使用哪个工作区
+            logger.info("消息路由调试 - chat_id: {}, _workspace_chat_map: {}",
+                       chat_id, _workspace_manager._workspace_chat_map)
             if chat_id:
                 workspace_index = _workspace_manager.get_chat_workspace(chat_id)
+                logger.info("根据 chat_id 获取的工作区索引: {}", workspace_index)
+                # 新群聊未绑定工作区时，提示用户选择
+                if workspace_index == -1:
+                    _send_feishu_text(chat_id, "👋 您好！这是您首次在此群聊中使用 Claude Code，请先选择一个工作区：")
+                    _send_workspace_selection_card(chat_id, open_id)
+                    _message_queue.task_done()
+                    continue
             else:
                 workspace_index = _current_workspace_index
+                logger.info("无 chat_id，使用全局工作区索引: {}", workspace_index)
 
             # 获取工作区信息
             if workspace_index < len(_workspaces):
@@ -930,6 +1137,25 @@ def _message_worker():
                 _message_queue.task_done()
                 continue
 
+            # 将当前 chat_id 写入工作区目录的配置文件，供 MCP 工具自动读取
+            workspace_dir = _workspaces[workspace_index].get("path", "")
+            if workspace_dir and chat_id:
+                # 写入 .feishu_current_chat_id 文件
+                chat_id_file = os.path.join(workspace_dir, ".feishu_current_chat_id")
+                try:
+                    with open(chat_id_file, 'w', encoding='utf-8') as f:
+                        f.write(chat_id)
+                    logger.debug(f"已更新工作区 chat_id 文件: {chat_id_file}")
+                except Exception as e:
+                    logger.warning(f"写入 chat_id 文件失败: {e}")
+
+                # 同时更新 .env 文件中的 FEISHU_CURRENT_CHAT_ID
+                update_workspace_env_chat_id(workspace_dir, chat_id)
+
+            # 检测并提示 admin open_id
+            if open_id:
+                detect_and_prompt_admin_open_id(open_id)
+
             # 构造带飞书标记的消息，提示 Claude 使用 feishu-bot MCP 回复
             is_card_interaction = user_text.startswith("【卡片交互】")
 
@@ -939,6 +1165,7 @@ def _message_worker():
 - 当前工作区: {workspace_name}
 - 用户已点击卡片按钮，请根据用户的操作继续处理
 - 请使用飞书机器人 MCP 工具将结果传回给用户
+- ⚠️ 重要：回复时请务必传入 chat_id={chat_id}
 
 交互内容：
 {user_text}"""
@@ -947,6 +1174,7 @@ def _message_worker():
                 feishu_marker = f"""【系统提示】此消息来自飞书。
 - 当前工作区: {workspace_name}
 - 请使用飞书机器人 MCP 工具将结果传回给用户
+- ⚠️ 重要：回复时请务必传入 chat_id={chat_id}
 
 用户消息：
 {user_text}"""
@@ -999,15 +1227,19 @@ def main():
     def _noop(_data):
         pass
 
+    # 卡片回调事件处理器 - 使用 SDK 内置的 register_p2_card_action_trigger 方法
+    # SDK 使用 p2.card.action.trigger 作为内部 key
+    logger.info("注册卡片回调事件处理器...")
     event_handler = (
         lark_oapi.EventDispatcherHandler.builder(ENCRYPT_KEY, VERIFICATION_TOKEN)
         .register_p2_im_message_receive_v1(do_process)
         .register_p1_customized_event("im.message.receive_v1", do_process)
-        .register_p1_customized_event("im.action.callback", do_action_callback)  # 卡片按钮点击事件
         .register_p2_im_message_message_read_v1(_noop)
         .register_p2_im_message_recalled_v1(_noop)
-        .build()
+        .register_p2_card_action_trigger(do_action_callback)  # 使用 SDK 内置方法
+        .build()  # 重要：需要调用 build() 构建处理器
     )
+    logger.info("卡片回调事件处理器注册成功!")
 
     client = lark_oapi.ws.Client(
         APP_ID, APP_SECRET, event_handler=event_handler, log_level=lark_oapi.LogLevel.INFO

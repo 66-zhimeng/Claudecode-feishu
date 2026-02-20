@@ -20,7 +20,17 @@ from typing import Optional, Dict, Any
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # 尝试从当前目录和脚本所在目录加载 .env
+    import os as _os
+    _script_dir = _os.path.dirname(_os.path.abspath(__file__))
+    _env_paths = [
+        _os.path.join(_script_dir, '.env'),
+        _os.path.join(_os.getcwd(), '.env'),
+    ]
+    for _env_path in _env_paths:
+        if _os.path.exists(_env_path):
+            load_dotenv(_env_path)
+            break
 except ImportError:
     pass
 
@@ -39,6 +49,10 @@ logger.add(
 # ==================== 配置 ====================
 APP_ID = os.environ.get("FEISHU_APP_ID", "").strip()
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "").strip()
+
+# 调试：打印环境变量加载情况
+logger.info(f"FEISHU_APP_ID loaded: {bool(APP_ID)}, value: {APP_ID[:10]}... if APP_ID else 'EMPTY'")
+logger.info(f"FEISHU_APP_SECRET loaded: {bool(APP_SECRET)}, value: {APP_SECRET[:10]}... if APP_SECRET else 'EMPTY'")
 
 # 白名单配置（可选，填写后只允许发送给这些用户）
 ALLOWED_OPEN_IDS = os.environ.get("FEISHU_ALLOWED_OPEN_IDS", "").strip()
@@ -97,6 +111,49 @@ def get_default_open_id() -> str:
 
 def get_default_chat_id() -> str:
     """从环境变量获取默认的 chat_id"""
+    return os.getenv("FEISHU_DEFAULT_CHAT_ID", "")
+
+
+def get_current_chat_id() -> str:
+    """获取当前工作区的 chat_id（自动传递机制）
+
+    优先级：
+    1. 当前工作目录的配置文件 .feishu_current_chat_id（实时更新）
+    2. 当前工作目录 .env 文件中的 FEISHU_CURRENT_CHAT_ID（动态更新）
+    3. 环境变量 FEISHU_CURRENT_CHAT_ID
+    4. 环境变量 FEISHU_DEFAULT_CHAT_ID（静态配置）
+    """
+    # 1. 优先从 .feishu_current_chat_id 文件读取（实时更新）
+    chat_id_file = os.path.join(os.getcwd(), ".feishu_current_chat_id")
+    if os.path.exists(chat_id_file):
+        try:
+            with open(chat_id_file, 'r', encoding='utf-8') as f:
+                chat_id = f.read().strip()
+                if chat_id:
+                    return chat_id
+        except Exception as e:
+            logger.warning(f"读取 .feishu_current_chat_id 文件失败: {e}")
+
+    # 2. 从当前工作目录的 .env 文件动态读取
+    env_file = os.path.join(os.getcwd(), ".env")
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        k, v = line.split('=', 1)
+                        if k.strip() == "FEISHU_CURRENT_CHAT_ID":
+                            return v.strip()
+        except Exception as e:
+            logger.warning(f"读取 .env 中的 CHAT_ID 失败: {e}")
+
+    # 3. 从环境变量读取
+    env_chat_id = os.getenv("FEISHU_CURRENT_CHAT_ID", "")
+    if env_chat_id:
+        return env_chat_id
+
+    # 4. 回退到静态环境变量
     return os.getenv("FEISHU_DEFAULT_CHAT_ID", "")
 
 
@@ -754,9 +811,11 @@ async def send_feishu_reply(message: str, open_id: str = "", chat_id: str = "", 
     """
     # 优先使用 chat_id（群聊），其次使用 open_id（个人）
     if not chat_id:
+        # 自动获取当前工作区的 chat_id
+        chat_id = get_current_chat_id()
         if not open_id:
             open_id = get_default_open_id()
-        if not open_id:
+        if not open_id and not chat_id:
             return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
 
     # 白名单验证（仅对个人消息）
@@ -801,9 +860,11 @@ async def send_feishu_interaction_receipt(action_id: str, open_id: str = "", cha
     """
     # 优先使用 chat_id（群聊），其次使用 open_id（个人）
     if not chat_id:
+        # 自动获取当前工作区的 chat_id
+        chat_id = get_current_chat_id()
         if not open_id:
             open_id = get_default_open_id()
-        if not open_id:
+        if not open_id and not chat_id:
             return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
 
     # 白名单验证（仅对个人消息）
@@ -845,9 +906,11 @@ async def send_feishu_rich_text(title: str, content: str, open_id: str = "", cha
     """
     # 优先使用 chat_id（群聊），其次使用 open_id（个人）
     if not chat_id:
+        # 自动获取当前工作区的 chat_id
+        chat_id = get_current_chat_id()
         if not open_id:
             open_id = get_default_open_id()
-        if not open_id:
+        if not open_id and not chat_id:
             return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
 
     # 白名单验证（仅对个人消息）
@@ -909,9 +972,11 @@ async def send_feishu_card(title: str, content: str,
     """
     # 优先使用 chat_id（群聊），其次使用 open_id（个人）
     if not chat_id:
+        # 自动获取当前工作区的 chat_id
+        chat_id = get_current_chat_id()
         if not open_id:
             open_id = get_default_open_id()
-        if not open_id:
+        if not open_id and not chat_id:
             return "❌ 错误：未配置 FEISHU_DEFAULT_OPEN_ID 环境变量"
 
     # 白名单验证（仅对个人消息）
@@ -922,6 +987,10 @@ async def send_feishu_card(title: str, content: str,
             logger.warning(f"拒绝发送给未授权用户: {open_id}")
             return "❌ 拒绝发送：用户不在白名单中"
         logger.info(f"[MCP调用] send_feishu_card - 发送给 {open_id}, 标题: {title}")
+
+    # 调试：打印环境变量
+    logger.info(f"APP_ID: {APP_ID[:10]}... if APP_ID else 'empty'")
+    logger.info(f"FEISHU_DEFAULT_CHAT_ID: {get_default_chat_id()}")
 
     client = get_feishu_client()
 
@@ -958,18 +1027,22 @@ async def send_feishu_card(title: str, content: str,
 
     # 发送到群聊或个人
     if chat_id:
+        logger.info(f"正在发送卡片到群聊: chat_id={chat_id}, card_type={card_type}")
         result = await client.send_message(chat_id, "interactive", card_content, receive_id_type="chat_id")
         if result.get("code") == 0:
             logger.info("卡片消息已发送到群聊 {}", chat_id)
             return "✅ 卡片消息已成功发送到群聊。"
     else:
+        logger.info(f"正在发送卡片到个人: open_id={open_id}, card_type={card_type}")
         result = await client.send_message(open_id, "interactive", card_content)
         if result.get("code") == 0:
             logger.info("卡片消息已发送给 {}", open_id)
             return "✅ 卡片消息已成功发送给用户。"
 
     logger.error("发送失败: {}", result)
-    return f"❌ 发送失败: {result.get('msg', result)}"
+    # 返回更详细的错误信息
+    error_detail = json.dumps(result, ensure_ascii=False, indent=2)
+    return f"❌ 发送失败: {result.get('msg', result)}\n\n详细信息: {error_detail}"
 
 
 @mcp.tool()
