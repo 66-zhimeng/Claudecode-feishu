@@ -51,8 +51,8 @@ APP_ID = os.environ.get("FEISHU_APP_ID", "").strip()
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "").strip()
 
 # 调试：打印环境变量加载情况
-logger.info(f"FEISHU_APP_ID loaded: {bool(APP_ID)}, value: {APP_ID[:10]}... if APP_ID else 'EMPTY'")
-logger.info(f"FEISHU_APP_SECRET loaded: {bool(APP_SECRET)}, value: {APP_SECRET[:10]}... if APP_SECRET else 'EMPTY'")
+logger.info(f"FEISHU_APP_ID loaded: {bool(APP_ID)}, value: {APP_ID[:10]}..." if APP_ID else "FEISHU_APP_ID loaded: False, value: EMPTY")
+logger.info(f"FEISHU_APP_SECRET loaded: {bool(APP_SECRET)}, value: {APP_SECRET[:10]}..." if APP_SECRET else "FEISHU_APP_SECRET loaded: False, value: EMPTY")
 
 # 白名单配置（可选，填写后只允许发送给这些用户）
 ALLOWED_OPEN_IDS = os.environ.get("FEISHU_ALLOWED_OPEN_IDS", "").strip()
@@ -223,47 +223,40 @@ async def auto_send_result(open_id: str, tool_name: str, result: Dict) -> None:
 
         logger.info(f"[自动发送] {tool_name} 结果已发送给 {open_id}")
     else:
-        # 失败：发送错误卡片（简洁格式）
+        # 失败：发送错误消息（使用正确的 post 格式）
         error_msg = result.get("message", "操作失败")
-        error_card = {
-            "title": f"❌ {tool_display_name} 失败",
-            "sections": [
-                {
-                    "header": "● 错误信息",
-                    "text": {
-                        "tag": "markdown",
-                        "content": error_msg
-                    }
-                }
-            ]
+        error_content = {
+            "zh_cn": {
+                "title": f"❌ {tool_display_name} 失败",
+                "content": [
+                    [{"tag": "text", "text": "● 错误信息"}],
+                    [{"tag": "text", "text": error_msg}]
+                ]
+            }
         }
-        await client.send_message(open_id, "post", error_card)
+        await client.send_message(open_id, "post", error_content)
         logger.warning(f"[自动发送] {tool_name} 失败消息已发送给 {open_id}")
 
 
-async def _send_as_rich_content(open_id: str, tool_name: str, message: str, data: Any) -> None:
-    """发送结构化富文本内容"""
+async def _send_as_rich_content(target_id: str, tool_name: str, message: str, data: Any, id_type: str = "open_id") -> None:
+    """发送结构化富文本内容
+
+    Args:
+        target_id: 接收者ID（open_id 或 chat_id）
+        tool_name: 工具名称
+        message: 消息内容
+        data: 数据字典或列表
+        id_type: ID类型，"open_id" 或 "chat_id"
+    """
     client = get_feishu_client()
 
-    # 构建结构化内容（使用 ● 分隔，避免过多 # 号）
-    sections = []
+    # 构建结构化内容（使用飞书 post 消息格式）
+    content_list = []
 
     # 标题部分
-    sections.append({
-        "header": tool_name,
-        "text": {
-            "tag": "markdown",
-            "content": f"✅ {message}"
-        }
-    })
-
-    # 分隔线
-    sections.append({
-        "text": {
-            "tag": "markdown",
-            "content": "━━━━━━━━━━━━━━"
-        }
-    })
+    content_list.append([{"tag": "text", "text": f"📋 {tool_name}"}])
+    content_list.append([{"tag": "text", "text": f"✅ {message}"}])
+    content_list.append([{"tag": "text", "text": "━━━━━━━━━━━━━━"}])
 
     # 数据部分 - 格式化展示
     if isinstance(data, dict):
@@ -274,13 +267,8 @@ async def _send_as_rich_content(open_id: str, tool_name: str, message: str, data
             formatted_key = _format_key(key)
             formatted_value = _format_value(value)
 
-            sections.append({
-                "header": f"● {formatted_key}",
-                "text": {
-                    "tag": "markdown",
-                    "content": formatted_value[:500]  # 限制单字段长度
-                }
-            })
+            content_list.append([{"tag": "text", "text": f"● {formatted_key}"}])
+            content_list.append([{"tag": "text", "text": formatted_value[:500]}])  # 限制单字段长度
     elif isinstance(data, list):
         # 列表数据
         list_items = []
@@ -291,20 +279,17 @@ async def _send_as_rich_content(open_id: str, tool_name: str, message: str, data
             else:
                 list_items.append(f"{i+1}. {str(item)[:50]}")
 
-        sections.append({
-            "header": f"● 数据列表 ({len(data)}条)",
-            "text": {
-                "tag": "markdown",
-                "content": "\n".join(list_items)
-            }
-        })
+        content_list.append([{"tag": "text", "text": f"● 数据列表 ({len(data)}条)"}])
+        content_list.append([{"tag": "text", "text": "\n".join(list_items)}])
 
     rich_content = {
-        "title": f"📋 {tool_name} 结果",
-        "sections": sections
+        "zh_cn": {
+            "title": f"📋 {tool_name} 结果",
+            "content": content_list
+        }
     }
 
-    await client.send_message(open_id, "post", rich_content)
+    await client.send_message(target_id, "post", rich_content, receive_id_type=id_type)
 
 
 async def _send_as_file(open_id: str, tool_name: str, message: str, data: Any) -> None:
@@ -321,20 +306,18 @@ async def _send_as_file(open_id: str, tool_name: str, message: str, data: Any) -
         temp_path = f.name
 
     try:
-        # 1. 先发送一条提示消息
-        intro_card = {
-            "title": f"📄 {tool_name} 结果",
-            "sections": [
-                {
-                    "header": "● 操作结果",
-                    "text": {
-                        "tag": "markdown",
-                        "content": f"✅ {message}\n\n📎 详细内容已生成文件，请查看附件"
-                    }
-                }
-            ]
+        # 1. 先发送一条提示消息（使用正确的 post 格式）
+        intro_msg = {
+            "zh_cn": {
+                "title": f"📄 {tool_name} 结果",
+                "content": [
+                    [{"tag": "text", "text": f"✅ {message}"}],
+                    [{"tag": "text", "text": ""}],
+                    [{"tag": "text", "text": "📎 详细内容已生成文件，请查看附件"}]
+                ]
+            }
         }
-        await client.send_message(open_id, "post", intro_card)
+        await client.send_message(open_id, "post", intro_msg)
 
         # 2. 上传文件到飞书
         file_key = await client.upload_file(temp_path, "stream")
@@ -924,18 +907,30 @@ async def send_feishu_rich_text(title: str, content: str, open_id: str = "", cha
 
     client = get_feishu_client()
 
-    # 构建富文本内容
+    # 构建富文本内容（正确的 post 消息格式）
+    # 将 markdown 内容转换为飞书 post 格式的段落
+    lines = content.split('\n')
+    content_list = []
+
+    for line in lines:
+        if line.strip():
+            # 处理加粗 **text**
+            import re
+            # 简单处理：将整个行作为文本段落
+            content_list.append([{
+                "tag": "text",
+                "text": line
+            }])
+
+    # 如果没有内容，添加一个空段落
+    if not content_list:
+        content_list.append([{"tag": "text", "text": ""}])
+
     rich_text_content = {
-        "title": title,
-        "sections": [
-            {
-                "header": title,
-                "text": {
-                    "tag": "markdown",
-                    "content": content
-                }
-            }
-        ]
+        "zh_cn": {
+            "title": title,
+            "content": content_list
+        }
     }
 
     if chat_id:
@@ -944,7 +939,7 @@ async def send_feishu_rich_text(title: str, content: str, open_id: str = "", cha
         result = await client.send_message(open_id, "post", rich_text_content)
 
     if result.get("code") == 0:
-        logger.info("富文本消息已发送给 {}", open_id)
+        logger.info("富文本消息已发送给 {}", chat_id or open_id)
         return "✅ 富文本消息已成功发送给用户。"
 
     logger.error("发送失败: {}", result)
@@ -989,7 +984,7 @@ async def send_feishu_card(title: str, content: str,
         logger.info(f"[MCP调用] send_feishu_card - 发送给 {open_id}, 标题: {title}")
 
     # 调试：打印环境变量
-    logger.info(f"APP_ID: {APP_ID[:10]}... if APP_ID else 'empty'")
+    logger.info(f"APP_ID: {APP_ID[:10]}..." if APP_ID else "APP_ID: empty")
     logger.info(f"FEISHU_DEFAULT_CHAT_ID: {get_default_chat_id()}")
 
     client = get_feishu_client()

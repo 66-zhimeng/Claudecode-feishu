@@ -1165,7 +1165,6 @@ def _message_worker():
 - 当前工作区: {workspace_name}
 - 用户已点击卡片按钮，请根据用户的操作继续处理
 - 请使用飞书机器人 MCP 工具将结果传回给用户
-- ⚠️ 重要：回复时请务必传入 chat_id={chat_id}
 
 交互内容：
 {user_text}"""
@@ -1174,7 +1173,6 @@ def _message_worker():
                 feishu_marker = f"""【系统提示】此消息来自飞书。
 - 当前工作区: {workspace_name}
 - 请使用飞书机器人 MCP 工具将结果传回给用户
-- ⚠️ 重要：回复时请务必传入 chat_id={chat_id}
 
 用户消息：
 {user_text}"""
