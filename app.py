@@ -581,7 +581,7 @@ class ProcessInputSender:
         time.sleep(0.2)
 
     def send_text_via_clipboard(self, text: str):
-        """通过剪贴板粘贴发送（支持中文）"""
+        """通过剪贴板粘贴发送（支持中文）。若剪贴板被占用会重试若干次。"""
         if not self.hwnd:
             return
 
@@ -589,10 +589,30 @@ class ProcessInputSender:
         self.activate_window()
         time.sleep(0.3)
 
-        win32clipboard.OpenClipboard()
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
-        win32clipboard.CloseClipboard()
+        # 剪贴板可能被其他进程占用（OpenClipboard 报错 5 拒绝访问），重试几次
+        last_err = None
+        for attempt in range(5):
+            try:
+                win32clipboard.OpenClipboard()
+                try:
+                    win32clipboard.EmptyClipboard()
+                    win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+                finally:
+                    win32clipboard.CloseClipboard()
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+                if attempt < 4:
+                    time.sleep(0.15 * (attempt + 1))
+        if last_err is not None:
+            logger.warning("剪贴板写入失败（已重试 5 次）: {}，跳过本次注入", last_err)
+            return
+
         time.sleep(0.3)
 
         # 模拟 Ctrl+V - 增加延迟确保窗口准备好
@@ -1222,7 +1242,7 @@ def main():
     logger.info("等待飞书消息中...")
     logger.info("=" * 50 + "\n")
 
-    def _noop(_data):
+    def _noop(*args, **kwargs):
         pass
 
     # 卡片回调事件处理器 - 使用 SDK 内置的 register_p2_card_action_trigger 方法
