@@ -43,10 +43,10 @@
 │                                  │                                       │
 │                                  ▼                                       │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  3. Claude Code 调用器 (subprocess)                             │   │
-│  │     - 使用 claude -p 执行任务                                    │   │
-│  │     - 使用 --continue 保持上下文连续对话                          │   │
-│  │     - 构造系统提示词，引导 Claude 使用 MCP 工具回复               │   │
+│  │  3. GUI 自动化 (Windows API)                                    │   │
+│  │     - 通过剪贴板注入文本到 Claude Code 窗口                      │   │
+│  │     - 使用 Ctrl+V 模拟粘贴 + 回车发送                            │   │
+│  │     - 自动查找 Claude Code 进程窗口                              │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────┬───────────────────────────────────────┘
                                   │ MCP 工具调用
@@ -57,10 +57,11 @@
 │  │  FastMCP 框架 - stdio 模式                                       │   │
 │  │                                                                  │   │
 │  │  工具列表：                                                       │   │
-│  │  • send_feishu_reply         - 发送文本消息                      │   │
-│  │  • send_feishu_rich_text    - 发送富文本消息                     │   │
-│  │  • send_feishu_card         - 发送交互式卡片消息                  │   │
-│  │  • send_feishu_reply_to_message - 回复指定消息                  │   │
+│  │  • send_feishu_reply              - 发送文本消息                    │   │
+│  │  • send_feishu_rich_text         - 发送富文本消息                  │   │
+│  │  • send_feishu_card              - 发送交互式卡片消息               │   │
+│  │  • send_feishu_interaction_receipt - 卡片交互回执                 │   │
+│  │  • send_feishu_reply_to_message  - 回复指定消息                   │   │
 │  │  • get_feishu_message       - 获取消息详情                      │   │
 │  │  • get_feishu_chat_history - 获取群聊历史                       │   │
 │  │  • recall_feishu_message   - 撤回消息                           │   │
@@ -94,7 +95,7 @@
 | `EventDispatcherHandler` | 事件分发器，注册消息接收、卡片交互等事件处理函数 |
 | `消息解析器` | 提取消息内容、open_id、chat_id、消息类型 |
 | `消息队列` | Python `queue.Queue`，实现异步消息处理 |
-| `Claude Worker` | 调用 `claude -p` 执行任务，支持 `--continue` 保持上下文 |
+| `Claude Worker` | 通过剪贴板注入文本到 Claude Code 窗口 |
 
 #### 2. feishu_mcp.py - MCP 工具服务
 
@@ -168,7 +169,7 @@ python app.py
 **强烈建议** 限制可触发 Claude 的用户：
 
 1. 先不设置 `FEISHU_MY_ADMIN_OPEN_ID`，发条消息给机器人
-2. 在终端日志中找到 `收到指令: ... (来自: ou_xxx)`
+2. 在终端日志中找到 `收到飞书消息: ... (open_id: ou_xxx, ...)`
 3. 在 `.env` 中添加：`FEISHU_MY_ADMIN_OPEN_ID=ou_xxx`
 
 之后只有你发的消息会触发 Claude。
@@ -249,8 +250,9 @@ python app.py
 
 | 变量名 | 说明 |
 |--------|------|
-| `WORKSPACE_DIRS` | 工作区目录列表，逗号分隔，如：`D:\project1,D:\project2` |
-| `DEFAULT_WORKSPACE` | 默认工作区名称（可选） |
+| `WORK_DIRS` | 工作区目录列表，逗号分隔，如：`D:\project1,D:\project2` |
+| `WORK_DIRS_AUTO_DISCOVER` | 设为 `true` 自动发现父目录下的所有子目录作为工作区 |
+| `WORK_DIRS_PARENT_DIR` | 自动发现时的父目录路径 |
 
 ### 工作区切换
 

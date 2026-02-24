@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "claude-mem": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "C:\\Users\\yq\\.claude\\plugins\\cache\\thedotmack\\claude-mem\\10.1.0\\scripts\\mcp-server.cjs"
+      ]
+    }
+  }
+}

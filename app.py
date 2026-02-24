@@ -1184,7 +1184,7 @@ def _message_worker():
                 feishu_marker = f"""【系统提示】此消息来自飞书（卡片交互回调）。
 - 当前工作区: {workspace_name}
 - 用户已点击卡片按钮，请根据用户的操作继续处理
-- 请使用飞书机器人 MCP 工具将结果传回给用户
+- 请使用飞书机器人 MCP (mcp__feishu-bot__*) 将结果传回给用户
 
 交互内容：
 {user_text}"""
@@ -1192,7 +1192,7 @@ def _message_worker():
                 # 普通文本消息
                 feishu_marker = f"""【系统提示】此消息来自飞书。
 - 当前工作区: {workspace_name}
-- 请使用飞书机器人 MCP 工具将结果传回给用户
+- 请使用飞书机器人 MCP (mcp__feishu-bot__*) 将结果传回给用户
 
 用户消息：
 {user_text}"""

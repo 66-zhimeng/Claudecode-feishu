@@ -1226,17 +1226,96 @@ async def recall_feishu_message(message_id: str) -> str:
 
 
 @mcp.tool()
-async def test_upload_file(open_id: str) -> str:
+async def send_feishu_file(file_path: str, open_id: str = "", chat_id: str = "", file_type: str = "stream") -> str:
+    """
+    发送本地文件给飞书用户或群聊。
+
+    支持发送任意本地文件（文档、代码、日志、图片等）。
+
+    Args:
+        file_path: 本地文件的绝对路径或相对路径。
+        open_id: 接收文件的用户 Open ID（可选，不填则自动获取）。
+        chat_id: 接收文件的群聊 ID（可选，优先级高于 open_id）。
+        file_type: 文件类型，可选 stream/pdf/doc/excel/ppt/mp4/mp3/image，默认 stream。
+    """
+    # 解析目标 ID（与其他工具一致的逻辑）
+    if not chat_id:
+        chat_id = get_current_chat_id()
+        if not open_id:
+            open_id = get_default_open_id()
+        if not open_id and not chat_id:
+            return "❌ 错误：未指定接收者，请提供 chat_id 或 open_id，或配置环境变量"
+
+    # 确定发送目标
+    if chat_id:
+        target_id = chat_id
+        id_type = "chat_id"
+        logger.info(f"[MCP调用] send_feishu_file - 发送文件到群聊 {chat_id}, 文件: {file_path}")
+    else:
+        if not validate_open_id(open_id):
+            logger.warning(f"拒绝发送给未授权用户: {open_id}")
+            return "❌ 拒绝发送：用户不在白名单中"
+        target_id = open_id
+        id_type = "open_id"
+        logger.info(f"[MCP调用] send_feishu_file - 发送文件给 {open_id}, 文件: {file_path}")
+
+    # 验证文件存在
+    abs_path = os.path.abspath(file_path)
+    if not os.path.exists(abs_path):
+        return f"❌ 文件不存在: {abs_path}"
+    if not os.path.isfile(abs_path):
+        return f"❌ 路径不是文件: {abs_path}"
+
+    client = get_feishu_client()
+
+    # 上传文件
+    file_key = await client.upload_file(abs_path, file_type)
+    if not file_key:
+        return "❌ 文件上传失败，请检查文件大小和格式"
+
+    # 发送文件消息
+    result = await client.send_file_message(target_id, file_key, receive_id_type=id_type)
+    if result.get("code") == 0:
+        file_name = os.path.basename(abs_path)
+        logger.info(f"文件 {file_name} 已发送给 {target_id}")
+        return f"✅ 文件 {file_name} 已成功发送！"
+
+    logger.error("发送文件失败: {}", result)
+    return f"❌ 发送文件失败: {result.get('msg', '未知错误')}"
+
+
+@mcp.tool()
+async def test_upload_file(open_id: str = "", chat_id: str = "") -> str:
     """
     测试文件上传功能（发送测试文件给用户）。
 
     Args:
-        open_id: 接收文件的用户 Open ID。
+        open_id: 接收文件的用户 Open ID（可选，不填则自动获取）。
+        chat_id: 接收文件的群聊 ID（可选，优先级高于 open_id）。
 
     Returns:
         上传结果。
     """
-    logger.info(f"[MCP调用] test_upload_file - 发送给 {open_id}")
+    # 解析目标 ID（与其他工具一致的逻辑）
+    if not chat_id:
+        chat_id = get_current_chat_id()
+        if not open_id:
+            open_id = get_default_open_id()
+        if not open_id and not chat_id:
+            return "❌ 错误：未指定接收者，请提供 chat_id 或 open_id，或配置环境变量"
+
+    # 确定发送目标
+    if chat_id:
+        target_id = chat_id
+        id_type = "chat_id"
+        logger.info(f"[MCP调用] test_upload_file - 发送测试文件到群聊 {chat_id}")
+    else:
+        if not validate_open_id(open_id):
+            logger.warning(f"拒绝发送给未授权用户: {open_id}")
+            return "❌ 拒绝发送：用户不在白名单中"
+        target_id = open_id
+        id_type = "open_id"
+        logger.info(f"[MCP调用] test_upload_file - 发送测试文件给 {open_id}")
 
     client = get_feishu_client()
 
@@ -1274,16 +1353,16 @@ async def test_upload_file(open_id: str) -> str:
 
     try:
         # 先发送提示消息
-        await client.send_message(open_id, "text", {"text": "📤 正在上传文件..."})
+        await client.send_message(target_id, "text", {"text": "📤 正在上传文件..."}, receive_id_type=id_type)
 
         # 上传文件
         file_key = await client.upload_file(temp_path, "stream")
 
         if file_key:
             # 发送文件
-            result = await client.send_file_message(open_id, file_key)
+            result = await client.send_file_message(target_id, file_key, receive_id_type=id_type)
             if result.get("code") == 0:
-                return "✅ 测试文件已发送给您！请查看附件。"
+                return "✅ 测试文件已发送！请查看附件。"
             else:
                 return f"❌ 发送失败: {result.get('msg', '未知错误')}"
         else:
